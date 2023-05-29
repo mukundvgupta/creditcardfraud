@@ -1,0 +1,444 @@
+---
+title: "Gupta_Rcode"
+author: "Mukund Gupta"
+date: "2023-04-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Importing required packages
+
+library(ranger)
+library(caret)
+library(data.table)
+library(caTools)
+library(rpart)
+library(rpart.plot)
+library(gbm, quietly=TRUE)
+library(pROC)
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(moments)
+library(randomForest)
+library(datasets)
+library(xgboost)
+library(ROSE)
+library(DMwR2)
+library(performanceEstimation)
+```
+
+```{r}
+# Importing data
+
+df <- read.csv("creditcard.csv")
+head(df)
+
+# Exploratory Data Analysis
+
+#Checking class of every variable
+sapply(df, class)
+
+##Check for null value 
+sum(is.na(df))
+
+dim(df)
+
+## Summary for known column variables
+summary(df$Amount)
+var(df$Amount)
+sd(df$Amount)
+
+summary(df$Time)
+var(df$Time)
+sd(df$Time)
+
+## Count number of fraud transactions
+sum(df$Class == 1)
+prop.table(table(df$Class))
+```
+
+```{r}
+common_theme <- theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+ggplot(data = df, aes(x = factor(Class), 
+                      y = prop.table(stat(count)), fill = factor(Class),
+                      label = scales::percent(prop.table(stat(count))))) +
+  geom_bar(position = "dodge") + 
+  geom_text(stat = 'count',
+            position = position_dodge(.9), 
+            vjust = -0.5, 
+            size = 3) + 
+  scale_x_discrete(labels = c("no fraud", "fraud"))+
+  scale_y_continuous(labels = scales::percent)+
+  labs(x = 'Class', y = 'Percentage') +
+  ggtitle("Distribution of class labels") +
+  common_theme
+
+### There are 284315 non-fraudulent transactions (99.827%) and 492 fraudulent transactions (0.173%) in the dataset.
+
+
+## visualizations of time and frequency to find how the time is distributed
+ggplot(df, aes(x = Time)) +
+  geom_histogram(color = "black", fill = "#DC143C", alpha = 0.9) +
+  ggtitle("Distribution of Transaction Times") +
+  labs(x = "Time", y = "Frequency")
+
+## visualizations of Amount and frequency to find the skewness of the amount
+ggplot(df, aes(x = Amount)) +
+  geom_histogram(color = "black", fill = "#DC143C", alpha = 0.9, bins = 30) +
+  ggtitle("Distribution of Transaction Amounts") +
+  labs(x = "Amount", y = "Frequency")
+
+## Calculate correlation matrix
+corr <- cor(df)
+
+## Plot heatmap
+ggplot(data = melt(corr), aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "yellow", high = "blue", mid = "white", midpoint = 0) +
+  labs(title = "Heatmap of Correlation")
+
+### Hence there is very less correlation among variables
+
+## Checking for the correlation with Target feature "class"
+
+corr <- cor(df[, -which(names(df) == "Class")], df[, "Class"])
+names(corr) <- names(df)[-which(names(df) == "Class")]
+
+print(corr)
+
+## Plot bar chart
+ggplot(data.frame(variables = names(corr), corr = corr), aes(x = variables, y = corr, fill = corr)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Correlation with class") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_gradient(low = "white", high = "green")
+
+### Here we could see that V2,V4,V8,V11,V19,V20,V21,V27,V28 features are positively correlted to "class" variable
+```
+
+```{r}
+## checking the skewness in data
+skew_data <- apply(df, 2, skewness)
+
+## printing the skewness values
+print(skew_data)
+
+ggplot(data.frame(skewness = skew_data), aes(x = skewness)) +
+  geom_histogram(fill = "#DC143C", color = "#aaff00", alpha = 0.9, bins = 34) +
+  labs(title = "Skewness Distribution", x = "Skewness Value", y = "Frequency")
+
+## Boxplot for outlier detection
+boxplot(df$Amount, main = "Boxplot", ylab = "Transaction amount")
+
+amount1 <- df[order(df$Amount), 'Amount']
+q1 <- quantile(amount1, 0.25)
+q3 <- quantile(amount1, 0.75)
+iqr1 <- q3 - q1
+lower_bound <- q1 - (1.5 * iqr1)
+upper_bound <- q3 + (1.5 * iqr1)
+
+cat("Number of outliers below the lower bound: ", sum(amount1 < lower_bound), " (", round(sum(amount1 < lower_bound) / length(amount1) * 100, 4), "%)\n")
+cat("Number of outliers above the upper bound: ", sum(amount1 > upper_bound), " (", round(sum(amount1 > upper_bound) / length(amount1) * 100, 4), "%)\n")
+
+## Checking Class with respect to amount ,How many data points are above the upper bound of the Fradulant transactions.
+upper_bound <- quantile(df$Amount, 0.75) + 1.5 * IQR(df$Amount)
+sum(df$Class == 1 & df$Amount > upper_bound)
+
+### Removing unnecessary columns like Time and Amount as these doesnt contribute much to the Model prediction.
+
+## Scaling the Amount column
+df$Amount <- as.numeric(scale(df$Amount))
+
+
+## Dropping Time and Amount columns
+df_1 <- df[, !names(df) %in% c("Time")]
+dim(df_1)
+```
+
+```{r}
+# Splitting data into training and test set
+
+set.seed(123)
+split <- sample.split(df_1$Class, SplitRatio = 0.70)
+train_data <- subset(df_1, split == TRUE)
+test_data <- subset(df_1, split == FALSE)
+dim(train_data)
+dim(test_data)
+
+# train_data$Class = as.factor(train_data$Class)
+```
+
+
+Applying Logistic Regression model
+
+```{r}
+lm <- glm(Class ~ ., test_data, family = binomial())
+summary(lm)
+plot(lm)
+lr_predict <- predict(lm, train_data, probability = TRUE)
+cm <- table(train_data[, 30], lr_predict > 0.5)
+cm
+
+lr_predict_test <- predict(lm, test_data, probability = TRUE)
+cm <- table(test_data[, 30], lr_predict_test > 0.5)
+cm
+
+lr_roc <- roc(test_data$Class,lr_predict_test , plot = TRUE, col = "blue", plotit = TRUE, print.auc=TRUE)
+print(lr_roc)
+```
+
+Applying Decision Tree model
+
+```{r}
+decisionTree_model <- rpart(Class ~ ., df, method = 'class')
+predicted_val <- predict(decisionTree_model, df, type = 'class')
+probability <- predict(decisionTree_model, df, type = 'prob')
+rpart.plot(decisionTree_model)
+
+orig_fit <- rpart(Class ~ ., data= train_data)
+
+#Evaluate model performance on test set
+pred_orig <- predict(orig_fit, newdata = test_data, method = "class")
+library(pROC)
+#roc.curve(test$Class, pred_orig[,2], plotit = TRUE)
+decisionTree_roc <- roc(test_data$Class, pred_orig, plot = TRUE, col = "red", plotit = TRUE, print.auc=TRUE)
+print(decisionTree_roc)
+```
+
+Applying Gradient Boosting model
+
+```{r}
+system.time(
+  model_gbm <- gbm(Class ~ .,
+                   distribution = "bernoulli",
+                   data = rbind(train_data, test_data),
+                   n.trees = 500,
+                   interaction.depth = 3,
+                   n.minobsinnode = 100,
+                   shrinkage = 0.01,
+                   bag.fraction = 0.5,
+                   train.fraction = nrow(train_data) / (nrow(train_data) + nrow(test_data)))
+)
+gbm.iter <- gbm.perf(model_gbm, method = "test")
+plot(model_gbm)
+gbm_test <- predict(model_gbm, newdata = test_data, n.trees = gbm.iter)
+
+## Determine the best iteration using training data
+gbm_auc <- roc(test_data$Class, gbm_test, plot = TRUE, col = "red", print.auc=TRUE)
+print(gbm_auc)
+```
+
+XGBoost
+
+```{r}
+## Set seed for reproducibility
+set.seed(123)
+
+## Train and test data
+train_X <- as.matrix(train_data[-ncol(train_data)])
+train_y <- train_data$Class
+
+test_X <- as.matrix(test_data[-ncol(test_data)])
+test_y <- test_data$Class
+
+## Train an XGBoost model
+xgb_model <- xgboost(data = train_X, 
+                     label = train_y,
+                     nrounds = 50, 
+                     objective = "binary:logistic",
+                     eval_metric = "auc")
+
+## Predict on the test data
+xgb_pred <- predict(xgb_model, test_X)
+
+## Calculate the AUC
+auc(test_y, xgb_pred)
+```
+
+Random Forest
+
+```{r}
+## Cross validation to determine the optimal value for ntree 
+
+## Define training control
+#ctrl <- trainControl(method = "cv", number = 5)
+
+## Define tuning grid for random forest
+#rf_grid <- expand.grid(mtry = c(5, 10, 15, 20))
+
+## Train random forest model with cross-validation
+#set.seed(123)
+#rf_model <- train(Class ~ ., data = train_data, method = "rf", trControl = ctrl, tuneGrid = rf_grid, tuneLength = 5)
+
+## Print cross-validation results
+#print(rf_model)
+
+## Fitting Random Forest to the train dataset using the optimal ntree value obtained from cross-vaidation
+set.seed(123)  # Setting seed
+classifier_RF = randomForest(x = train_data[-30],
+                             y = train_data$Class,
+                             ntree = 100) #using ntree=100 since value over 100 are taking too long to compute 
+classifier_RF
+
+## Predicting the Test set results
+y_pred = predict(classifier_RF, test_data[-30])
+y_test = test_data$Class
+
+# Confusion Matrix
+#confusion_mtx = table(test_data[, 30], y_pred)
+#confusion_mtx
+
+## Plotting ROC curve
+roc_obj <- roc(y_test, y_pred)
+plot(roc_obj, print.thres = c(0.05,0.1,0.25,0.5,0.75,0.9), print.auc = TRUE)
+```
+
+Resampling data
+
+```{r}
+# Separate the features (predictor variables) from the target variable
+X <- df_1[, -30]
+y <- df_1[, 30]
+
+# Split the dataset into training and testing sets
+set.seed(123)
+trainIndex <- createDataPartition(y, p = 0.7, list = FALSE)
+X_train <- X[trainIndex, ]
+y_train <- y[trainIndex]
+X_test <- X[-trainIndex, ]
+y_test <- y[-trainIndex]
+
+dim(X_train)
+dim(y_train)
+dim(X_test)
+dim(y_test)
+
+# Separate the majority and minority classes
+majority_class <- train_data[train_data$Class == 0, ]
+minority_class <- train_data[train_data$Class == 1, ]
+
+#Undersampling
+
+# Determine number of positive examples (class 1) in training set
+n_pos <- sum(y_train == 1)
+
+# Undersample the majority class to have the same number of examples as the minority class
+idx_majority <- which(y_train == 0)
+idx_undersample <- sample(idx_majority, size = n_pos, replace = FALSE)
+X_train_undersample <- rbind(X_train[idx_undersample, ], X_train[y_train == 1, ])
+y_train_undersample <- c(rep(1, n_pos), rep(0, n_pos))
+
+# Train a logistic regression model on the undersampled data
+model_undersample <- glm(y_train_undersample ~ ., data = X_train_undersample, family = "binomial")
+
+# Make predictions on the testing data
+probs_undersample <- predict(model_undersample, newdata = X_test, type = "response")
+
+# Calculate the AUC value for the undersampled data
+auc_undersample <- roc(y_test, probs_undersample)$auc
+
+# Print the AUC value
+cat("AUC (undersampling):", auc_undersample, "\n")
+```
+
+OverSampling
+
+```{r}
+# Calculate the number of examples to generate for the majority class
+n_pos_os <- nrow(minority_class)
+n_neg_os <- nrow(majority_class)
+n_to_generate <- n_neg_os - 3 * n_pos_os
+
+# Randomly sample examples from the majority class to generate
+idx_majority <- sample(1:n_neg_os, size = n_to_generate, replace = TRUE)
+generated_examples <- majority_class[idx_majority, ]
+
+# Combine the generated examples with the minority class
+oversampled_data <- rbind(minority_class, generated_examples)
+
+# Shuffle the rows of oversampled_data
+set.seed(123)
+shuffled_idx <- sample(nrow(oversampled_data))
+oversampled_data <- oversampled_data[shuffled_idx,]
+
+# Split into features and target variable
+X_train_oversample <- oversampled_data[, -30]
+y_train_oversample <- oversampled_data[, 30]
+
+# Train a model on the oversampled data
+model_oversample <- glm(y ~ ., data = X, family = "binomial")
+
+# Make predictions on the testing data
+probs_oversample <- predict(model_oversample, newdata = X_test, type = "response")
+
+# Calculate the AUC value for the undersampled data
+auc_oversample <- roc(y_test, probs_oversample)$auc
+
+# Print the AUC value
+cat("AUC (oversampling):", auc_oversample, "\n")
+```
+
+
+ADASYN
+```{r}
+n_min <- nrow(minority_class)
+
+# Calculate the number of synthetic samples to generate
+n_syn <- ceiling(n_min * 0.5)
+
+# Generate synthetic samples using ADASYN algorithm
+set.seed(123)
+adasyn_df <- ovun.sample(Class ~ ., data = train_data, method = "both", N = n_syn)$data
+
+# Train a logistic regression model using the oversampled data
+model_adasyn <- glm(Class ~ ., data = adasyn_df, family = "binomial")
+
+# Make predictions on the testing data
+probs_adasyn <- predict(model_adasyn, newdata = X_test, type = "response")
+
+# Calculate the AUC value for the undersampled data
+auc_adasyn <- roc(y_test, probs_adasyn)$auc
+
+# Print the AUC value
+cat("AUC (ADASYN):", auc_adasyn, "\n")
+```
+
+SMOTE
+```{r}
+# count the number of samples in the minority class
+n_min <- sum(train_data$Class == "1")
+
+# count the number of samples in the majority class
+n_maj <- sum(train_data$Class == "0")
+
+# set the desired number of synthetic samples to generate
+n_syn_smote <- n_maj - n_min
+
+# perform SMOTE
+smote_obj <- ROSE(Class ~ ., data = train_data, N = n_syn_smote, seed = 123)
+
+# extract the data frame from the ROSE object
+smote_df <- smote_obj$data # separate the synthetic samples and the original samples
+
+# separate the synthetic samples and the original samples
+synthetic_df <- smote_df[(nrow(train_data) + 1):nrow(smote_df), ]
+original_df <- smote_df[1:nrow(train_data), ]
+
+# train a logistic regression model using the oversampled data
+model_smote <- glm(Class ~ ., data = smote_df, family = "binomial")
+
+# make predictions on the testing data
+probs_smote <- predict(model_smote, newdata = X_test, type = "response")
+
+# calculate the AUC value for the oversampled data
+auc_smote <- roc(y_test, probs_smote)$auc
+
+# print the AUC value
+cat("AUC (SMOTE):", auc_smote, "\n")
+```
